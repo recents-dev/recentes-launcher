@@ -1,0 +1,3 @@
+<resources>
+    <string name="service_desc">Detecta qual app está aberto para montar a lista de recentes.</string>
+</resources>
