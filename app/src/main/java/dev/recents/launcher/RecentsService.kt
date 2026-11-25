@@ -8,6 +8,7 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
@@ -28,11 +29,16 @@ import kotlin.math.abs
 
 class RecentsService : AccessibilityService() {
 
-    private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
     private val handler = Handler(Looper.getMainLooper())
+    private val bgThread = HandlerThread("recents-check").apply { start() }
+    private val bg = Handler(bgThread.looper)
 
-    private var lastDump = 0L
-    private var pendingCheck = false
+    @Volatile private var querying = false
+    private var again = false
+    private var settleLeft = 0
+    private var holdUntil = 0L
+
     private var overlay: View? = null
     private var dismissed = false
     private var lastState = ""
@@ -44,13 +50,30 @@ class RecentsService : AccessibilityService() {
     private var listVersion = 0
     private var scrollRef: HorizontalScrollView? = null
     private var rowRef: LinearLayout? = null
+    private var contentRef: View? = null
     private var needsScroll = true
 
     private val iconCache = HashMap<String, Drawable>()
     private val labelCache = HashMap<String, String>()
     private val launchableCache = HashMap<String, Boolean>()
 
+    private val homePkgs: Set<String> by lazy {
+        try {
+            val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            packageManager.queryIntentActivities(i, 0)
+                .map { it.activityInfo.packageName }
+                .toSet()
+        } catch (ex: Exception) {
+            emptySet()
+        }
+    }
+
     private val prebuildRunnable = Runnable { prebuild() }
+    private val settleRunnable = Runnable { scheduleCheck() }
+    private val forceHideRunnable = Runnable {
+        log("[overlay] forcado")
+        hideOverlay()
+    }
 
     companion object {
         const val LAUNCHER = "com.motorola.launcher3"
@@ -69,6 +92,15 @@ class RecentsService : AccessibilityService() {
         if (pkg == packageName) return
 
         if (pkg == LAUNCHER) {
+            if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                val cls = e.className?.toString() ?: ""
+                log("[launcher-janela] ${cls.substringAfterLast('.')}")
+                if (cls.contains("RecentsActivity")) {
+                    holdUntil = System.currentTimeMillis() + 1200
+                    applyState(true, false)
+                }
+            }
+            settleLeft = 20
             scheduleCheck()
             return
         }
@@ -89,52 +121,69 @@ class RecentsService : AccessibilityService() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         hideOverlay()
+        bgThread.quitSafely()
         super.onDestroy()
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun isLaunchable(pkg: String): Boolean =
-        launchableCache.getOrPut(pkg) { packageManager.getLaunchIntentForPackage(pkg) != null }
+        launchableCache.getOrPut(pkg) {
+            pkg !in homePkgs && packageManager.getLaunchIntentForPackage(pkg) != null
+        }
 
     private fun scheduleCheck() {
-        val now = System.currentTimeMillis()
-        if (now - lastDump >= 60) {
-            lastDump = now
-            checkLauncher()
-        } else if (!pendingCheck) {
-            pendingCheck = true
-            handler.postDelayed({
-                pendingCheck = false
-                lastDump = System.currentTimeMillis()
-                checkLauncher()
-            }, 80)
+        if (querying) {
+            again = true
+            return
+        }
+        querying = true
+        bg.post { runQuery() }
+    }
+
+    private fun runQuery() {
+        var ok = false
+        var panelVis = false
+        var clearVis = false
+        try {
+            val root = rootInActiveWindow
+            if (root != null && root.packageName?.toString() == LAUNCHER) {
+                ok = true
+                panelVis = root.findAccessibilityNodeInfosByViewId(PANEL_ID)
+                    .any { it.isVisibleToUser }
+                clearVis = root.findAccessibilityNodeInfosByViewId(CLEAR_ID)
+                    .any { it.isVisibleToUser }
+            }
+        } catch (ex: Exception) {
+            ok = false
+        }
+        handler.post {
+            querying = false
+            if (ok) applyState(panelVis, clearVis)
+            if (again) {
+                again = false
+                scheduleCheck()
+            } else if (settleLeft > 0) {
+                settleLeft--
+                handler.removeCallbacks(settleRunnable)
+                handler.postDelayed(settleRunnable, 120)
+            }
         }
     }
 
-    private fun checkLauncher() {
-        try {
-            val root = rootInActiveWindow ?: return
-            if (root.packageName?.toString() != LAUNCHER) return
-
-            val panelVis = root.findAccessibilityNodeInfosByViewId(PANEL_ID).any { it.isVisibleToUser }
-            val clearVis = root.findAccessibilityNodeInfosByViewId(CLEAR_ID).any { it.isVisibleToUser }
-            val open = panelVis || clearVis
-
-            val state = "recentes=$open panel=$panelVis clear=$clearVis"
-            if (state != lastState) {
-                lastState = state
-                log("[launcher] $state")
-            }
-
-            if (open) {
-                showOverlay()
-            } else {
-                dismissed = false
-                hideOverlay()
-            }
-        } catch (ex: Exception) {
-            log("[launcher] erro: ${ex.javaClass.simpleName}")
+    private fun applyState(panelVis: Boolean, clearVis: Boolean) {
+        val open = panelVis || clearVis
+        val state = "recentes=$open panel=$panelVis clear=$clearVis"
+        if (state != lastState) {
+            lastState = state
+            log("[launcher] $state")
+        }
+        if (open) {
+            showOverlay()
+        } else {
+            if (System.currentTimeMillis() < holdUntil) return
+            dismissed = false
+            hideOverlay()
         }
     }
 
@@ -166,6 +215,7 @@ class RecentsService : AccessibilityService() {
         val bounds = wm.maximumWindowMetrics.bounds
 
         val view = ensureView(bounds.width(), bounds.height())
+        contentRef?.visibility = View.VISIBLE
         needsScroll = true
 
         val lp = WindowManager.LayoutParams(
@@ -196,6 +246,7 @@ class RecentsService : AccessibilityService() {
     }
 
     private fun hideOverlay() {
+        handler.removeCallbacks(forceHideRunnable)
         val v = overlay ?: return
         overlay = null
         try {
@@ -207,8 +258,13 @@ class RecentsService : AccessibilityService() {
 
     private fun goHome() {
         dismissed = true
+        contentRef?.visibility = View.INVISIBLE
         performGlobalAction(GLOBAL_ACTION_HOME)
-        hideOverlay()
+        handler.removeCallbacks(forceHideRunnable)
+        handler.postDelayed(forceHideRunnable, 1500)
+        settleLeft = 20
+        handler.removeCallbacks(settleRunnable)
+        handler.postDelayed(settleRunnable, 150)
     }
 
     private fun buildOverlayView(screenW: Int, screenH: Int): View {
@@ -222,10 +278,12 @@ class RecentsService : AccessibilityService() {
         val sidePad = (screenW - cardW) / 2 - margin
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#F2111114"))
+            setBackgroundColor(Color.parseColor("#FF111114"))
             clipChildren = false
             setOnClickListener { goHome() }
         }
+        val content = FrameLayout(this).apply { clipChildren = false }
+        root.addView(content, FrameLayout.LayoutParams(matchP, matchP))
 
         val empty = TextView(this).apply {
             text = "Nenhum app recente"
@@ -277,6 +335,7 @@ class RecentsService : AccessibilityService() {
         }
         scrollRef = scroll
         rowRef = row
+        contentRef = content
 
         val clearBtn = TextView(this).apply {
             text = "Fechar tudo"
@@ -293,14 +352,14 @@ class RecentsService : AccessibilityService() {
             }
         }
 
-        root.addView(empty, FrameLayout.LayoutParams(wrapP, wrapP, Gravity.CENTER))
-        root.addView(
+        content.addView(empty, FrameLayout.LayoutParams(wrapP, wrapP, Gravity.CENTER))
+        content.addView(
             scroll,
             FrameLayout.LayoutParams(matchP, headerH + cardH).apply {
                 topMargin = (screenH * 0.065f).toInt()
             }
         )
-        root.addView(
+        content.addView(
             clearBtn,
             FrameLayout.LayoutParams(matchP, dp(52), Gravity.BOTTOM).apply {
                 setMargins(dp(30), 0, dp(30), (screenH * 0.06f).toInt())
@@ -431,13 +490,15 @@ class RecentsService : AccessibilityService() {
     private fun openApp(pkg: String) {
         val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        dismissed = true
+        contentRef?.visibility = View.INVISIBLE
         try {
             startActivity(intent)
         } catch (ex: Exception) {
             log("[abrir] erro: ${ex.javaClass.simpleName}")
         }
-        dismissed = true
-        hideOverlay()
+        handler.removeCallbacks(forceHideRunnable)
+        handler.postDelayed(forceHideRunnable, 1500)
     }
 
     private fun labelOf(pkg: String): String = labelCache.getOrPut(pkg) {
