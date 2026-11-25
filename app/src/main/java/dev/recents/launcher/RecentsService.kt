@@ -131,20 +131,27 @@ class RecentsService : AccessibilityService() {
             }
         }
 
+        val bounds = wm.maximumWindowMetrics.bounds
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            bounds.width(),
+            bounds.height(),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.x = 0
+        lp.y = 0
+        lp.setFitInsetsTypes(0)
+        lp.layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
 
         try {
             wm.addView(view, lp)
             overlay = view
-            log("[overlay] mostrado")
+            log("[overlay] mostrado ${bounds.width()}x${bounds.height()}")
         } catch (ex: Exception) {
             log("[overlay] erro: ${ex.javaClass.simpleName}")
         }
