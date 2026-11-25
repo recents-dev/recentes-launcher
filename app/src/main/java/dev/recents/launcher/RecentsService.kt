@@ -35,9 +35,9 @@ class RecentsService : AccessibilityService() {
 
     companion object {
         const val LAUNCHER = "com.motorola.launcher3"
-        const val MATCH = ViewGroup_MATCH
-        const val WRAP = ViewGroup_WRAP
-    }
+        companion object {
+    const val LAUNCHER = "com.motorola.launcher3"
+}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
