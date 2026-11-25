@@ -38,6 +38,7 @@ class RecentsService : AccessibilityService() {
     private var again = false
     private var settleLeft = 0
     private var holdUntil = 0L
+    private var pendingPkg: String? = null
 
     private var overlay: View? = null
     private var dismissed = false
@@ -72,7 +73,9 @@ class RecentsService : AccessibilityService() {
     private val settleRunnable = Runnable { scheduleCheck() }
     private val forceHideRunnable = Runnable {
         log("[overlay] forcado")
+        pendingPkg = null
         hideOverlay()
+        dismissed = false
     }
 
     companion object {
@@ -108,8 +111,16 @@ class RecentsService : AccessibilityService() {
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         if (pkg == "com.android.systemui") return
 
-        dismissed = false
-        hideOverlay()
+        val waiting = pendingPkg
+        if (waiting != null) {
+            if (pkg != waiting) return
+            pendingPkg = null
+            handler.postDelayed({ fadeOutOverlay() }, 120)
+        } else {
+            dismissed = false
+            hideOverlay()
+        }
+
         log("$pkg\n    ${e.className ?: "?"}")
 
         if (!isLaunchable(pkg)) return
@@ -215,6 +226,8 @@ class RecentsService : AccessibilityService() {
         val bounds = wm.maximumWindowMetrics.bounds
 
         val view = ensureView(bounds.width(), bounds.height())
+        view.animate().cancel()
+        view.alpha = 1f
         contentRef?.visibility = View.VISIBLE
         needsScroll = true
 
@@ -249,11 +262,31 @@ class RecentsService : AccessibilityService() {
         handler.removeCallbacks(forceHideRunnable)
         val v = overlay ?: return
         overlay = null
+        v.animate().cancel()
         try {
             (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v)
         } catch (ex: Exception) {
         }
         log("[overlay] escondido")
+    }
+
+    private fun fadeOutOverlay() {
+        val v = overlay
+        if (v == null) {
+            dismissed = false
+            return
+        }
+        v.animate()
+            .alpha(0f)
+            .setDuration(150)
+            .withEndAction {
+                if (overlay === v) {
+                    hideOverlay()
+                    dismissed = false
+                }
+                v.alpha = 1f
+            }
+            .start()
     }
 
     private fun goHome() {
@@ -491,10 +524,12 @@ class RecentsService : AccessibilityService() {
         val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         dismissed = true
+        pendingPkg = pkg
         contentRef?.visibility = View.INVISIBLE
         try {
             startActivity(intent)
         } catch (ex: Exception) {
+            pendingPkg = null
             log("[abrir] erro: ${ex.javaClass.simpleName}")
         }
         handler.removeCallbacks(forceHideRunnable)
