@@ -7,6 +7,8 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
@@ -14,7 +16,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -28,13 +29,38 @@ import kotlin.math.abs
 class RecentsService : AccessibilityService() {
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val handler = Handler(Looper.getMainLooper())
+
     private var lastDump = 0L
+    private var pendingCheck = false
     private var overlay: View? = null
     private var dismissed = false
     private var lastState = ""
 
+    private var cachedView: View? = null
+    private var cachedVersion = -1
+    private var cachedW = 0
+    private var cachedH = 0
+    private var listVersion = 0
+    private var scrollRef: HorizontalScrollView? = null
+    private var rowRef: LinearLayout? = null
+    private var needsScroll = true
+
+    private val iconCache = HashMap<String, Drawable>()
+    private val labelCache = HashMap<String, String>()
+    private val launchableCache = HashMap<String, Boolean>()
+
+    private val prebuildRunnable = Runnable { prebuild() }
+
     companion object {
         const val LAUNCHER = "com.motorola.launcher3"
+        const val PANEL_ID = "com.motorola.launcher3:id/overview_panel"
+        const val CLEAR_ID = "com.motorola.launcher3:id/action_clear_all"
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        handler.postDelayed(prebuildRunnable, 500)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -43,11 +69,7 @@ class RecentsService : AccessibilityService() {
         if (pkg == packageName) return
 
         if (pkg == LAUNCHER) {
-            val now = System.currentTimeMillis()
-            if (now - lastDump > 300) {
-                lastDump = now
-                checkLauncher()
-            }
+            scheduleCheck()
             return
         }
 
@@ -58,54 +80,51 @@ class RecentsService : AccessibilityService() {
         hideOverlay()
         log("$pkg\n    ${e.className ?: "?"}")
 
-        if (packageManager.getLaunchIntentForPackage(pkg) == null) return
+        if (!isLaunchable(pkg)) return
         addRecent(pkg)
     }
 
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
         hideOverlay()
         super.onDestroy()
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
+    private fun isLaunchable(pkg: String): Boolean =
+        launchableCache.getOrPut(pkg) { packageManager.getLaunchIntentForPackage(pkg) != null }
+
+    private fun scheduleCheck() {
+        val now = System.currentTimeMillis()
+        if (now - lastDump >= 60) {
+            lastDump = now
+            checkLauncher()
+        } else if (!pendingCheck) {
+            pendingCheck = true
+            handler.postDelayed({
+                pendingCheck = false
+                lastDump = System.currentTimeMillis()
+                checkLauncher()
+            }, 80)
+        }
+    }
+
     private fun checkLauncher() {
         try {
             val root = rootInActiveWindow ?: return
             if (root.packageName?.toString() != LAUNCHER) return
 
-            var panelVis = false
-            var clearVis = false
-            var taskVis = false
-            var count = 0
-
-            val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
-            queue.add(root to 0)
-            while (queue.isNotEmpty() && count < 600) {
-                val (n, depth) = queue.removeFirst()
-                count++
-                val id = n.viewIdResourceName?.substringAfter(":id/") ?: ""
-                val txt = n.text?.toString() ?: ""
-                val vis = n.isVisibleToUser
-                if (id == "overview_panel" && vis) panelVis = true
-                if (vis && (id.contains("clear_all") || txt == "Remover tudo" || txt == "Clear all")) {
-                    clearVis = true
-                }
-                if (vis && id == "task") taskVis = true
-                if (depth < 8) {
-                    for (i in 0 until n.childCount) {
-                        n.getChild(i)?.let { queue.add(it to depth + 1) }
-                    }
-                }
-            }
-
+            val panelVis = root.findAccessibilityNodeInfosByViewId(PANEL_ID).any { it.isVisibleToUser }
+            val clearVis = root.findAccessibilityNodeInfosByViewId(CLEAR_ID).any { it.isVisibleToUser }
             val open = panelVis || clearVis
-            val state = "recentes=$open panel=$panelVis clear=$clearVis task=$taskVis"
+
+            val state = "recentes=$open panel=$panelVis clear=$clearVis"
             if (state != lastState) {
                 lastState = state
-                log("[launcher] $state nos=$count")
+                log("[launcher] $state")
             }
 
             if (open) {
@@ -119,12 +138,35 @@ class RecentsService : AccessibilityService() {
         }
     }
 
+    private fun ensureView(w: Int, h: Int): View {
+        val c = cachedView
+        if (c != null && cachedVersion == listVersion && cachedW == w && cachedH == h) return c
+        val v = buildOverlayView(w, h)
+        cachedView = v
+        cachedVersion = listVersion
+        cachedW = w
+        cachedH = h
+        return v
+    }
+
+    private fun prebuild() {
+        if (overlay != null) return
+        try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val b = wm.maximumWindowMetrics.bounds
+            ensureView(b.width(), b.height())
+        } catch (ex: Exception) {
+            log("[prebuild] erro: ${ex.javaClass.simpleName}")
+        }
+    }
+
     private fun showOverlay() {
         if (overlay != null || dismissed) return
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val bounds = wm.maximumWindowMetrics.bounds
 
-        val view = buildOverlayView(bounds.width(), bounds.height())
+        val view = ensureView(bounds.width(), bounds.height())
+        needsScroll = true
 
         val lp = WindowManager.LayoutParams(
             bounds.width(),
@@ -132,7 +174,8 @@ class RecentsService : AccessibilityService() {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.START
@@ -145,6 +188,7 @@ class RecentsService : AccessibilityService() {
         try {
             wm.addView(view, lp)
             overlay = view
+            scrollRef?.post { scrollRef?.scrollTo(rowRef?.width ?: 0, 0) }
             log("[overlay] mostrado ${bounds.width()}x${bounds.height()}")
         } catch (ex: Exception) {
             log("[overlay] erro: ${ex.javaClass.simpleName}")
@@ -213,7 +257,7 @@ class RecentsService : AccessibilityService() {
         }
 
         val pkgs = readList()
-            .filter { packageManager.getLaunchIntentForPackage(it) != null }
+            .filter { isLaunchable(it) }
             .reversed()
         for (pkg in pkgs) {
             row.addView(
@@ -225,13 +269,14 @@ class RecentsService : AccessibilityService() {
         }
         updateEmpty()
 
-        var positioned = false
         scroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            if (!positioned && row.width > 0) {
-                positioned = true
+            if (needsScroll && row.width > 0) {
+                needsScroll = false
                 scroll.scrollTo(row.width, 0)
             }
         }
+        scrollRef = scroll
+        rowRef = row
 
         val clearBtn = TextView(this).apply {
             text = "Fechar tudo"
@@ -362,6 +407,7 @@ class RecentsService : AccessibilityService() {
                                 .setDuration(150)
                                 .withEndAction {
                                     saveList(readList().filter { it != pkg })
+                                    cachedVersion = listVersion
                                     onRemoved(v)
                                 }
                                 .start()
@@ -394,16 +440,23 @@ class RecentsService : AccessibilityService() {
         hideOverlay()
     }
 
-    private fun labelOf(pkg: String): String = try {
-        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
-    } catch (e: Exception) {
-        pkg
+    private fun labelOf(pkg: String): String = labelCache.getOrPut(pkg) {
+        try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (e: Exception) {
+            pkg
+        }
     }
 
-    private fun iconOf(pkg: String): Drawable = try {
-        packageManager.getApplicationIcon(pkg)
-    } catch (e: Exception) {
-        packageManager.defaultActivityIcon
+    private fun iconOf(pkg: String): Drawable {
+        val d = iconCache.getOrPut(pkg) {
+            try {
+                packageManager.getApplicationIcon(pkg)
+            } catch (e: Exception) {
+                packageManager.defaultActivityIcon
+            }
+        }
+        return d.constantState?.newDrawable(resources)?.mutate() ?: d
     }
 
     private fun readList(): List<String> {
@@ -414,6 +467,7 @@ class RecentsService : AccessibilityService() {
     }
 
     private fun saveList(list: List<String>) {
+        listVersion++
         getSharedPreferences("recents", Context.MODE_PRIVATE)
             .edit()
             .putString("list", list.joinToString("\n"))
@@ -431,8 +485,12 @@ class RecentsService : AccessibilityService() {
     }
 
     private fun addRecent(pkg: String) {
-        val list = readList().filter { it != pkg }.toMutableList()
+        val cur = readList()
+        if (cur.firstOrNull() == pkg) return
+        val list = cur.filter { it != pkg }.toMutableList()
         list.add(0, pkg)
         saveList(list.take(20))
+        handler.removeCallbacks(prebuildRunnable)
+        handler.postDelayed(prebuildRunnable, 400)
     }
 }
