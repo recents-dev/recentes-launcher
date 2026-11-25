@@ -2,8 +2,15 @@ package dev.recents.launcher
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.FrameLayout
+import android.widget.TextView
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -12,10 +19,12 @@ class RecentsService : AccessibilityService() {
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private var lastDump = 0L
+    private var overlay: View? = null
+    private var dismissed = false
+    private var lastState = ""
 
     companion object {
         const val LAUNCHER = "com.motorola.launcher3"
-        val KEYWORDS = listOf("overview", "recents", "task", "clear", "snapshot")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -25,33 +34,39 @@ class RecentsService : AccessibilityService() {
 
         if (pkg == LAUNCHER) {
             val now = System.currentTimeMillis()
-            if (now - lastDump > 400) {
+            if (now - lastDump > 300) {
                 lastDump = now
-                dumpLauncher(e.eventType)
+                checkLauncher()
             }
             return
         }
 
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (pkg == "com.android.systemui") return
+
+        dismissed = false
+        hideOverlay()
         log("$pkg\n    ${e.className ?: "?"}")
 
-        if (pkg == "com.android.systemui") return
         if (packageManager.getLaunchIntentForPackage(pkg) == null) return
         addRecent(pkg)
     }
 
     override fun onInterrupt() {}
 
-    private fun dumpLauncher(type: Int) {
+    override fun onDestroy() {
+        hideOverlay()
+        super.onDestroy()
+    }
+
+    private fun checkLauncher() {
         try {
             val root = rootInActiveWindow ?: return
             if (root.packageName?.toString() != LAUNCHER) return
 
-            val ids = LinkedHashSet<String>()
-            var recentsAny = false
-            var recentsVis = false
-            var taskVis = false
+            var panelVis = false
             var clearVis = false
+            var taskVis = false
             var count = 0
 
             val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
@@ -59,26 +74,14 @@ class RecentsService : AccessibilityService() {
             while (queue.isNotEmpty() && count < 600) {
                 val (n, depth) = queue.removeFirst()
                 count++
-                val cls = n.className?.toString() ?: ""
                 val id = n.viewIdResourceName?.substringAfter(":id/") ?: ""
                 val txt = n.text?.toString() ?: ""
                 val vis = n.isVisibleToUser
-
-                if (cls.contains("RecentsView")) {
-                    recentsAny = true
-                    if (vis) recentsVis = true
-                    ids.add("cls:" + cls.substringAfterLast('.'))
-                }
-                if (cls.contains("TaskView")) {
-                    if (vis) taskVis = true
-                    ids.add("cls:" + cls.substringAfterLast('.'))
-                }
+                if (id == "overview_panel" && vis) panelVis = true
                 if (vis && (id.contains("clear_all") || txt == "Remover tudo" || txt == "Clear all")) {
                     clearVis = true
                 }
-                if (id.isNotEmpty() && KEYWORDS.any { id.contains(it, true) }) {
-                    ids.add(if (vis) id else "$id(oculto)")
-                }
+                if (vis && id == "task") taskVis = true
                 if (depth < 8) {
                     for (i in 0 until n.childCount) {
                         n.getChild(i)?.let { queue.add(it to depth + 1) }
@@ -86,16 +89,75 @@ class RecentsService : AccessibilityService() {
                 }
             }
 
-            val tipo = if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) "estado" else "conteudo"
-            val idList = ids.take(12).joinToString(", ")
-            log(
-                "[launcher] $tipo nos=$count\n" +
-                    "    RecentsView existe=$recentsAny visivel=$recentsVis | TaskView visivel=$taskVis | ClearAll visivel=$clearVis\n" +
-                    "    ids: $idList"
-            )
+            val open = panelVis || clearVis
+            val state = "recentes=$open panel=$panelVis clear=$clearVis task=$taskVis"
+            if (state != lastState) {
+                lastState = state
+                log("[launcher] $state nos=$count")
+            }
+
+            if (open) {
+                showOverlay()
+            } else {
+                dismissed = false
+                hideOverlay()
+            }
         } catch (ex: Exception) {
             log("[launcher] erro: ${ex.javaClass.simpleName}")
         }
+    }
+
+    private fun showOverlay() {
+        if (overlay != null || dismissed) return
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val view = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#CC1B3A57"))
+            addView(
+                TextView(this@RecentsService).apply {
+                    text = "Tela de recentes (teste)\n\nToque para fechar"
+                    setTextColor(Color.WHITE)
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                },
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            setOnClickListener {
+                dismissed = true
+                hideOverlay()
+            }
+        }
+
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+
+        try {
+            wm.addView(view, lp)
+            overlay = view
+            log("[overlay] mostrado")
+        } catch (ex: Exception) {
+            log("[overlay] erro: ${ex.javaClass.simpleName}")
+        }
+    }
+
+    private fun hideOverlay() {
+        val v = overlay ?: return
+        overlay = null
+        try {
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v)
+        } catch (ex: Exception) {
+        }
+        log("[overlay] escondido")
     }
 
     private fun log(body: String) {
