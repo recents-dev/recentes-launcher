@@ -590,4 +590,16 @@ class RecentsService : AccessibilityService() {
             .filter { it.isNotEmpty() }
         if (old.firstOrNull()?.substringAfter("  ") == body) return
         val list = (listOf("${timeFmt.format(Date())}  $body") + old).take(60)
-        prefs.edit().putString("log", list.joinToString("\n\n")
+        prefs.edit().putString("log", list.joinToString("\n\n")        prefs.edit().putString("log", list.joinToString("\n\n")).apply()
+    }
+
+    private fun addRecent(pkg: String) {
+        val cur = readList()
+        if (cur.firstOrNull() == pkg) return
+        val list = cur.filter { it != pkg }.toMutableList()
+        list.add(0, pkg)
+        saveList(list.take(20))
+        handler.removeCallbacks(prebuildRunnable)
+        handler.postDelayed(prebuildRunnable, 400)
+    }
+                               }
