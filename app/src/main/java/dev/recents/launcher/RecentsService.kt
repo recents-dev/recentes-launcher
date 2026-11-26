@@ -38,6 +38,7 @@ class RecentsService : AccessibilityService() {
     private var again = false
     private var settleLeft = 0
     private var holdUntil = 0L
+    private var blockShowUntil = 0L
     private var pendingPkg: String? = null
 
     private var overlay: View? = null
@@ -76,12 +77,14 @@ class RecentsService : AccessibilityService() {
         pendingPkg = null
         hideOverlay()
         dismissed = false
+        blockShowUntil = System.currentTimeMillis() + 500
     }
 
     companion object {
         const val LAUNCHER = "com.motorola.launcher3"
         const val PANEL_ID = "com.motorola.launcher3:id/overview_panel"
         const val CLEAR_ID = "com.motorola.launcher3:id/action_clear_all"
+        const val ANY = "*"
     }
 
     override fun onServiceConnected() {
@@ -113,9 +116,10 @@ class RecentsService : AccessibilityService() {
 
         val waiting = pendingPkg
         if (waiting != null) {
-            if (pkg != waiting) return
+            if (waiting != ANY && pkg != waiting) return
             pendingPkg = null
-            handler.postDelayed({ fadeOutOverlay() }, 120)
+            log("[saida] $pkg")
+            handler.postDelayed({ fadeOutOverlay() }, 60)
         } else {
             dismissed = false
             hideOverlay()
@@ -193,6 +197,7 @@ class RecentsService : AccessibilityService() {
             showOverlay()
         } else {
             if (System.currentTimeMillis() < holdUntil) return
+            if (pendingPkg != null) return
             dismissed = false
             hideOverlay()
         }
@@ -222,6 +227,10 @@ class RecentsService : AccessibilityService() {
 
     private fun showOverlay() {
         if (overlay != null || dismissed) return
+        if (System.currentTimeMillis() < blockShowUntil) {
+            log("[overlay] bloqueado")
+            return
+        }
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val bounds = wm.maximumWindowMetrics.bounds
 
@@ -278,11 +287,12 @@ class RecentsService : AccessibilityService() {
         }
         v.animate()
             .alpha(0f)
-            .setDuration(150)
+            .setDuration(120)
             .withEndAction {
                 if (overlay === v) {
                     hideOverlay()
                     dismissed = false
+                    blockShowUntil = System.currentTimeMillis() + 500
                 }
                 v.alpha = 1f
             }
@@ -291,6 +301,8 @@ class RecentsService : AccessibilityService() {
 
     private fun goHome() {
         dismissed = true
+        pendingPkg = ANY
+        blockShowUntil = System.currentTimeMillis() + 900
         contentRef?.visibility = View.INVISIBLE
         performGlobalAction(GLOBAL_ACTION_HOME)
         handler.removeCallbacks(forceHideRunnable)
@@ -525,6 +537,7 @@ class RecentsService : AccessibilityService() {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         dismissed = true
         pendingPkg = pkg
+        blockShowUntil = System.currentTimeMillis() + 900
         contentRef?.visibility = View.INVISIBLE
         try {
             startActivity(intent)
@@ -577,16 +590,4 @@ class RecentsService : AccessibilityService() {
             .filter { it.isNotEmpty() }
         if (old.firstOrNull()?.substringAfter("  ") == body) return
         val list = (listOf("${timeFmt.format(Date())}  $body") + old).take(60)
-        prefs.edit().putString("log", list.joinToString("\n\n")).apply()
-    }
-
-    private fun addRecent(pkg: String) {
-        val cur = readList()
-        if (cur.firstOrNull() == pkg) return
-        val list = cur.filter { it != pkg }.toMutableList()
-        list.add(0, pkg)
-        saveList(list.take(20))
-        handler.removeCallbacks(prebuildRunnable)
-        handler.postDelayed(prebuildRunnable, 400)
-    }
-}
+        prefs.edit().putString("log", list.joinToString("\n\n")
