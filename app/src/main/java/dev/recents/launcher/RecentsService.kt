@@ -85,6 +85,8 @@ class RecentsService : AccessibilityService() {
         const val PANEL_ID = "com.motorola.launcher3:id/overview_panel"
         const val CLEAR_ID = "com.motorola.launcher3:id/action_clear_all"
         const val ANY = "*"
+        const val SHOW_DELAY = 90L
+        const val SHOW_FADE = 130L
     }
 
     override fun onServiceConnected() {
@@ -236,7 +238,7 @@ class RecentsService : AccessibilityService() {
 
         val view = ensureView(bounds.width(), bounds.height())
         view.animate().cancel()
-        view.alpha = 1f
+        view.alpha = 0f
         contentRef?.visibility = View.VISIBLE
         needsScroll = true
 
@@ -260,6 +262,11 @@ class RecentsService : AccessibilityService() {
         try {
             wm.addView(view, lp)
             overlay = view
+            view.animate()
+                .alpha(1f)
+                .setStartDelay(SHOW_DELAY)
+                .setDuration(SHOW_FADE)
+                .start()
             scrollRef?.post { scrollRef?.scrollTo(rowRef?.width ?: 0, 0) }
             log("[overlay] mostrado ${bounds.width()}x${bounds.height()}")
         } catch (ex: Exception) {
@@ -287,6 +294,7 @@ class RecentsService : AccessibilityService() {
         }
         v.animate()
             .alpha(0f)
+            .setStartDelay(0)
             .setDuration(120)
             .withEndAction {
                 if (overlay === v) {
@@ -586,21 +594,4 @@ class RecentsService : AccessibilityService() {
     private fun log(body: String) {
         val prefs = getSharedPreferences("debug", Context.MODE_PRIVATE)
         val old = (prefs.getString("log", "") ?: "")
-            .split("\n\n")
-            .filter { it.isNotEmpty() }
-        if (old.firstOrNull()?.substringAfter("  ") == body) return
-        val list = (listOf("${timeFmt.format(Date())}  $body") + old).take(60)
-        prefs.edit().putString("log", list.joinToString("\n\n")    ).apply()
-        prefs.edit().putString("log", list.joinToString("\n\n")).apply()
-    }
-
-    private fun addRecent(pkg: String) {
-        val cur = readList()
-        if (cur.firstOrNull() == pkg) return
-        val list = cur.filter { it != pkg }.toMutableList()
-        list.add(0, pkg)
-        saveList(list.take(20))
-        handler.removeCallbacks(prebuildRunnable)
-        handler.postDelayed(prebuildRunnable, 400)
-    }
-                               }
+            .sp
