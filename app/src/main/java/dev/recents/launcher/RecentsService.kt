@@ -76,8 +76,8 @@ class RecentsService : AccessibilityService() {
         const val PANEL_ID = "com.motorola.launcher3:id/overview_panel"
         const val CLEAR_ID = "com.motorola.launcher3:id/action_clear_all"
         const val ANY = "*"
-        const val SHOW_DELAY = 90L
-        const val SHOW_FADE = 130L
+        const val SHOW_DELAY = 20L
+        const val SHOW_FADE = 70L
     }
 
     override fun onServiceConnected() {
