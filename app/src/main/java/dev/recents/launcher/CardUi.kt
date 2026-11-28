@@ -18,14 +18,14 @@ internal fun RecentsService.buildCard(
     cardW: Int,
     cardH: Int,
     iconSize: Int,
-    gap: Int,
+    slot: Int,
     onRemoved: (View) -> Unit
 ): View {
     val half = iconSize / 2
     val page = FrameLayout(this).apply {
         clipChildren = false
         layoutParams = LinearLayout.LayoutParams(cardW, cardH + half).apply {
-            setMargins(gap, 0, gap, 0)
+            setMargins(slot, 0, slot, 0)
         }
     }
 
@@ -41,6 +41,17 @@ internal fun RecentsService.buildCard(
         ImageView(this).apply { setImageDrawable(iconOf(pkg)) },
         FrameLayout.LayoutParams(dp(88), dp(88), Gravity.CENTER)
     )
+    val scrim = View(this).apply {
+        setBackgroundColor(Color.BLACK)
+        alpha = 0f
+    }
+    body.addView(
+        scrim,
+        FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+    )
     page.addView(body, FrameLayout.LayoutParams(cardW, cardH).apply { topMargin = half })
 
     page.addView(
@@ -48,6 +59,7 @@ internal fun RecentsService.buildCard(
         FrameLayout.LayoutParams(iconSize, iconSize, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
     )
 
+    page.tag = scrim
     attachGestures(page, pkg, onRemoved)
     return page
 }
@@ -109,16 +121,28 @@ internal fun RecentsService.attachGestures(card: View, pkg: String, onRemoved: (
     }
 }
 
-internal fun applyDepth(scroll: HorizontalScrollView, row: LinearLayout, step: Int) {
+private fun stackOffset(a: Float): Float {
+    return when {
+        a <= 1f -> 0.29f * a
+        a <= 2f -> 0.29f + 0.165f * (a - 1f)
+        a <= 3f -> 0.455f + 0.115f * (a - 2f)
+        else -> 0.57f + 0.05f * (a - 3f)
+    }
+}
+
+internal fun applyDepth(scroll: HorizontalScrollView, row: LinearLayout, step: Int, cardW: Int) {
     val center = scroll.scrollX + scroll.width / 2f
     for (i in 0 until row.childCount) {
         val c = row.getChildAt(i)
-        var d = abs((c.left + c.width / 2f) - center) / step
-        if (d > 1f) d = 1f
-        val s = 1f - 0.12f * d
+        val dx = (c.left + c.width / 2f) - center
+        val a = abs(dx) / step
+        val sign = if (dx < 0f) -1f else 1f
+        c.translationX = sign * stackOffset(a) * cardW - dx
+        val s = maxOf(0.55f, 1f - 0.14f * a)
         c.scaleX = s
         c.scaleY = s
-        c.alpha = 1f - 0.5f * d
+        c.translationZ = -a
+        (c.tag as? View)?.alpha = minOf(0.75f, 0.35f * a)
     }
 }
 
