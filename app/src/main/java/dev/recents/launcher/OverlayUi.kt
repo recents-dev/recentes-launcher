@@ -18,10 +18,10 @@ internal fun RecentsService.buildOverlayView(screenW: Int, screenH: Int): View {
     val cardW = (screenW * 0.625f).toInt()
     val cardH = (cardW * 2.11f).toInt()
     val iconSize = dp(60)
-    val gap = dp(10)
     val pageH = cardH + iconSize / 2
-    val step = cardW + 2 * gap
-    val sidePad = (screenW - cardW) / 2 - gap
+    val step = (cardW * 0.36f).toInt()
+    val slot = (step - cardW) / 2
+    val sidePad = (screenW - step) / 2
 
     val root = FrameLayout(this).apply {
         background = GradientDrawable(
@@ -68,17 +68,17 @@ internal fun RecentsService.buildOverlayView(screenW: Int, screenH: Int): View {
         .reversed()
     for (pkg in pkgs) {
         row.addView(
-            buildCard(pkg, cardW, cardH, iconSize, gap) { v ->
+            buildCard(pkg, cardW, cardH, iconSize, slot) { v ->
                 row.removeView(v)
                 updateEmpty()
-                scroll.post { applyDepth(scroll, row, step) }
+                scroll.post { applyDepth(scroll, row, step, cardW) }
             }
         )
     }
     updateEmpty()
 
     scroll.setOnScrollChangeListener { _, _, _, _, _ ->
-        applyDepth(scroll, row, step)
+        applyDepth(scroll, row, step, cardW)
     }
     scroll.setOnTouchListener { _, ev ->
         if (ev.actionMasked == MotionEvent.ACTION_UP ||
@@ -93,7 +93,7 @@ internal fun RecentsService.buildOverlayView(screenW: Int, screenH: Int): View {
             needsScroll = false
             scroll.scrollTo(row.width, 0)
         }
-        applyDepth(scroll, row, step)
+        applyDepth(scroll, row, step, cardW)
     }
     scrollRef = scroll
     rowRef = row
